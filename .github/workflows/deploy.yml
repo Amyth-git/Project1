@@ -1,0 +1,95 @@
+name: Deploy
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy"
+        required: true
+        default: latest
+      environment:
+        description: "Target environment"
+        required: true
+        default: staging
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  ECR_REPOSITORY: project1-api
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Image metadata
+        id: meta
+        run: |
+          TAG="${{ github.event.inputs.image_tag || github.ref_name }}"
+          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${TAG}"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+
+  deploy-ecs:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Deploy ECS service
+        env:
+          CLUSTER: project1-${{ github.event.inputs.environment || 'staging' }}
+          SERVICE: project1-${{ github.event.inputs.environment || 'staging' }}-api
+          IMAGE: ${{ needs.build-and-push.outputs.image }}
+        run: |
+          set -euo pipefail
+          TASK_DEF=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+            --query 'services[0].taskDefinition' --output text)
+          FAMILY=$(aws ecs describe-task-definition --task-definition "$TASK_DEF" \
+            --query 'taskDefinition.family' --output text)
+          NEW_DEF=$(aws ecs describe-task-definition --task-definition "$TASK_DEF" \
+            --query 'taskDefinition' --output json \
+            | python3 -c "
+          import json, os, sys
+          data = json.load(sys.stdin)
+          image = os.environ['IMAGE']
+          for c in data['containerDefinitions']:
+              if c['name'] == 'api':
+                  c['image'] = image
+          keep = ['family','networkMode','containerDefinitions','cpu','memory',
+                  'executionRoleArn','taskRoleArn','requiresCompatibilities']
+          print(json.dumps({k: data[k] for k in keep if k in data}))
+          ")
+          NEW_ARN=$(aws ecs register-task-definition --cli-input-json "$NEW_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
+            --task-definition "$NEW_ARN" --force-new-deployment
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          echo "Deployed $IMAGE to $SERVICE"

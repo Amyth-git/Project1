@@ -1,0 +1,59 @@
+groups:
+  - name: project1-app
+    rules:
+      - alert: ServiceDown
+        expr: up{job="project1-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Project1 API is down"
+          description: "Prometheus has not scraped project1-api for more than 1 minute."
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{job="project1-api",status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(http_requests_total{job="project1-api"}[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High 5xx rate on Project1 API"
+          description: "More than 5% of requests are failing."
+
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job="project1-api"}[5m]))) > 0.75
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 latency above 750ms"
+
+  - name: project1-infra
+    rules:
+      - alert: HostHighCPU
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host CPU usage above 85%"
+
+      - alert: HostLowDisk
+        expr: |
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) < 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Less than 15% disk remaining"
+
+      - alert: ContainerRestarting
+        expr: increase(container_start_time_seconds[15m]) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container is restarting frequently"
