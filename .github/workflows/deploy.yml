@@ -45,7 +45,7 @@ jobs:
           IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${TAG}"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: ./app
           push: true
